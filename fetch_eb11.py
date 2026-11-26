@@ -2,8 +2,12 @@
 """Download every Project Gutenberg slice of the Encyclopaedia Britannica,
 11th Edition (plain text) into ./eb11/ as UTF-8 and write ./manifest.csv.
 
-v2: tries several ways to get the list of books, downloads from the
+v3: tries several ways to get the list of books, downloads from the
 Gutenberg mirror first, and prints every error it hits.
+New in v3:
+  - get() takes a timeout; Gutendex gets 5 tries x 180 s.
+  - If ids.txt exists (whitespace-separated Gutenberg IDs), it is used
+    instead of any online listing, so the main site being down doesn't matter.
 Safe to re-run: files that already exist are skipped.
 """
 import csv
@@ -21,7 +25,8 @@ import urllib.request
 PREFIX = "encyclopaedia britannica, 11th edition"
 OUT_DIR = "eb11"
 MANIFEST = "manifest.csv"
-USER_AGENT = "eb11-fetch/2.0 (personal offline-reader project)"
+IDS_FILE = "ids.txt"
+USER_AGENT = "eb11-fetch/3.0 (personal offline-reader project)"
 DELAY_SECONDS = 1.5
 MIRROR_HOST = "aleph.gutenberg.org"
 
@@ -33,12 +38,12 @@ SEARCH_URL = (
 )
 
 
-def get(url, tries=3):
+def get(url, tries=3, timeout=60):
     last_error = None
     for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (404, 410):
@@ -82,7 +87,7 @@ def from_gutendex():
     found = []
     url = GUTENDEX_URL
     for _ in range(30):
-        data = json.loads(get(url).decode("utf-8"))
+        data = json.loads(get(url, tries=5, timeout=180).decode("utf-8"))
         for book in data.get("results", []):
             if matches(book.get("title")):
                 found.append((int(book["id"]), clean(book["title"])))
@@ -114,6 +119,15 @@ def from_search_pages():
 
 
 def find_slices():
+    # Manual list wins: skips every online listing source.
+    if os.path.exists(IDS_FILE):
+        with open(IDS_FILE, encoding="utf-8") as fh:
+            ids = [int(x) for x in fh.read().split()]
+        print(f"[list] {IDS_FILE}: {len(ids)} books", flush=True)
+        return [
+            (i, f"Encyclopaedia Britannica, 11th Edition (id {i})")
+            for i in sorted(set(ids))
+        ]
     for name, func in (
         ("Gutenberg catalog", from_catalog),
         ("Gutendex", from_gutendex),
