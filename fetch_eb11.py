@@ -11,8 +11,10 @@ import io
 import json
 import os
 import re
+import ssl
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -21,7 +23,7 @@ OUT_DIR = "eb11"
 MANIFEST = "manifest.csv"
 USER_AGENT = "eb11-fetch/2.0 (personal offline-reader project)"
 DELAY_SECONDS = 1.5
-MIRROR = "https://aleph.gutenberg.org"
+MIRROR_HOST = "aleph.gutenberg.org"
 
 CATALOG_URL = "https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv"
 GUTENDEX_URL = "https://gutendex.com/books/?search=encyclopaedia+britannica+11th+edition"
@@ -38,6 +40,16 @@ def get(url, tries=3):
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=60) as resp:
                 return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 410):
+                raise  # the file simply isn't there; don't waste time retrying
+            last_error = exc
+            time.sleep(2 * (attempt + 1))
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLError):
+                raise  # certificate problem; retrying won't fix it
+            last_error = exc
+            time.sleep(2 * (attempt + 1))
         except Exception as exc:  # noqa: BLE001 - retry on anything
             last_error = exc
             time.sleep(2 * (attempt + 1))
@@ -49,7 +61,8 @@ def clean(title):
 
 
 def matches(title):
-    return clean(title).lower().startswith(PREFIX)
+    normalized = clean(title).lower().replace("\u00e6", "ae")
+    return normalized.startswith(PREFIX)
 
 
 # ---------- ways to get the list of books ----------
@@ -122,12 +135,17 @@ def find_slices():
 def mirror_urls(book_id):
     digits = str(book_id)
     folder = "/".join(digits[:-1]) + "/" + digits
-    base = f"{MIRROR}/{folder}"
-    return [
-        (f"{base}/{book_id}-0.txt", "utf-8"),
-        (f"{base}/{book_id}.txt", "utf-8"),
-        (f"{base}/{book_id}-8.txt", "latin-1"),
-    ]
+    names = [(f"{book_id}-0.txt", "utf-8"), (f"{book_id}.txt", "utf-8"),
+             (f"{book_id}-8.txt", "latin-1")]
+    urls = []
+    for name, encoding in names:
+        # https first; the mirror's certificate is often invalid, so fall back to http
+        for scheme in ("https", "http"):
+            urls.append((f"{scheme}://{MIRROR_HOST}/{folder}/{name}", encoding))
+    return urls
+
+
+_seen_errors = set()
 
 
 def fetch_text(book_id):
@@ -139,7 +157,10 @@ def fetch_text(book_id):
         try:
             data = get(url, tries=2)
         except Exception as exc:  # noqa: BLE001
-            print(f"    {url} -> {exc}", flush=True)
+            key = (url.split("/")[2], url.split(":")[0], str(exc))
+            if key not in _seen_errors:  # print each distinct problem once
+                _seen_errors.add(key)
+                print(f"    {url} -> {exc}", flush=True)
             continue
         if len(data) > 1000:
             if encoding != "utf-8":
