@@ -2,12 +2,8 @@
 """Download every Project Gutenberg slice of the Encyclopaedia Britannica,
 11th Edition (plain text) into ./eb11/ as UTF-8 and write ./manifest.csv.
 
-v3: tries several ways to get the list of books, downloads from the
+v2: tries several ways to get the list of books, downloads from the
 Gutenberg mirror first, and prints every error it hits.
-New in v3:
-  - get() takes a timeout; Gutendex gets 5 tries x 180 s.
-  - If ids.txt exists (whitespace-separated Gutenberg IDs), it is used
-    instead of any online listing, so the main site being down doesn't matter.
 Safe to re-run: files that already exist are skipped.
 """
 import csv
@@ -25,25 +21,24 @@ import urllib.request
 PREFIX = "encyclopaedia britannica, 11th edition"
 OUT_DIR = "eb11"
 MANIFEST = "manifest.csv"
-IDS_FILE = "ids.txt"
-USER_AGENT = "eb11-fetch/3.0 (personal offline-reader project)"
+USER_AGENT = "eb11-fetch/2.0 (personal offline-reader project)"
 DELAY_SECONDS = 1.5
 MIRROR_HOST = "aleph.gutenberg.org"
 
 CATALOG_URL = "https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv"
-GUTENDEX_URL = "https://gutendex.com/books/?search=encyclopaedia+britannica+11th+edition"
+GUTENDEX_BASE = "https://gutendex.com/books/?search="
 SEARCH_URL = (
     "https://www.gutenberg.org/ebooks/search/"
     "?query=Encyclopaedia+Britannica+11th+Edition&start_index={start}"
 )
 
 
-def get(url, tries=3, timeout=60):
+def get(url, tries=3):
     last_error = None
     for attempt in range(tries):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (404, 410):
@@ -83,19 +78,32 @@ def from_catalog():
     return found
 
 
+def gutendex_queries():
+    yield "britannica 11th edition"
+    yield "britannica eleventh edition"
+    for n in range(1, 30):
+        yield f"britannica 11th edition volume {n}"
+
+
 def from_gutendex():
-    found = []
-    url = GUTENDEX_URL
-    for _ in range(30):
-        data = json.loads(get(url, tries=5, timeout=180).decode("utf-8"))
-        for book in data.get("results", []):
-            if matches(book.get("title")):
-                found.append((int(book["id"]), clean(book["title"])))
-        url = data.get("next")
-        if not url:
-            break
+    found = {}
+    for query in gutendex_queries():
+        url = GUTENDEX_BASE + urllib.parse.quote_plus(query)
+        for _ in range(30):
+            try:
+                data = json.loads(get(url).decode("utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[list] gutendex query '{query}' failed: {exc}", flush=True)
+                break
+            for book in data.get("results", []):
+                if matches(book.get("title")):
+                    found[int(book["id"])] = clean(book["title"])
+            url = data.get("next")
+            if not url:
+                break
+            time.sleep(1)
         time.sleep(1)
-    return found
+    return list(found.items())
 
 
 def from_search_pages():
@@ -119,15 +127,6 @@ def from_search_pages():
 
 
 def find_slices():
-    # Manual list wins: skips every online listing source.
-    if os.path.exists(IDS_FILE):
-        with open(IDS_FILE, encoding="utf-8") as fh:
-            ids = [int(x) for x in fh.read().split()]
-        print(f"[list] {IDS_FILE}: {len(ids)} books", flush=True)
-        return [
-            (i, f"Encyclopaedia Britannica, 11th Edition (id {i})")
-            for i in sorted(set(ids))
-        ]
     for name, func in (
         ("Gutenberg catalog", from_catalog),
         ("Gutendex", from_gutendex),
@@ -149,7 +148,7 @@ def find_slices():
 def mirror_urls(book_id):
     digits = str(book_id)
     folder = "/".join(digits[:-1]) + "/" + digits
-    names = [(f"{book_id}-0.txt", "utf-8"), (f"{book_id}.txt", "utf-8"),
+    names = [(f"{book_id}-0.txt", "utf-8"), (f"{book_id}.txt", "latin-1"),
              (f"{book_id}-8.txt", "latin-1")]
     urls = []
     for name, encoding in names:
@@ -177,10 +176,23 @@ def fetch_text(book_id):
                 print(f"    {url} -> {exc}", flush=True)
             continue
         if len(data) > 1000:
-            if encoding != "utf-8":
+            try:
                 data = data.decode(encoding).encode("utf-8")
+            except UnicodeDecodeError:
+                data = data.decode("latin-1").encode("utf-8")
             return data
     return None
+
+
+def report_coverage(rows):
+    have = set()
+    for _, title, _, _ in rows:
+        m = re.search(r"Volume (\d+)", title)
+        if m:
+            have.add(int(m.group(1)))
+    missing = [v for v in range(1, 29) if v not in have]
+    print(f"Volumes present: {sorted(have)}")
+    print(f"MISSING volumes (1-28): {missing if missing else 'none'}", flush=True)
 
 
 def main():
@@ -218,6 +230,7 @@ def main():
         writer.writerow(["id", "title", "bytes", "status"])
         writer.writerows(rows)
 
+    report_coverage(rows)
     total = sum(r[2] for r in rows)
     print(
         f"\nDone. downloaded={downloaded} skipped={skipped} failed={failed} "
