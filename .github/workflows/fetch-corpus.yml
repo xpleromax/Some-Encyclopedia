@@ -1,0 +1,35 @@
+name: Fetch EB1911 corpus and TEI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download, split and commit each bundle
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          for name in corpus tei; do
+            echo "===== $name ====="
+            mkdir -p "$name"
+            curl -fL --retry 5 --retry-delay 10 -A "eb1911-fetch (personal project)" \
+              -o "/tmp/eb1911-$name.tar.gz" \
+              "https://britannica11.org/download/eb1911-$name.tar.gz"
+            ls -l "/tmp/eb1911-$name.tar.gz"
+            echo "entries in $name archive: $(tar tzf "/tmp/eb1911-$name.tar.gz" | wc -l)"
+            tar tzf "/tmp/eb1911-$name.tar.gz" | head -10 || true
+            sha256sum "/tmp/eb1911-$name.tar.gz" | tee "$name/SHA256.txt"
+            split -b 40m -d "/tmp/eb1911-$name.tar.gz" "$name/eb1911-$name.tar.gz.part-"
+            ls -l "$name"
+            git add "$name"
+            git commit -m "Add EB1911 $name bundle (split into parts)" || echo "Nothing new to commit"
+            git push
+          done
